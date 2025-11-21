@@ -53,7 +53,7 @@ export class Map implements AfterViewInit, OnDestroy {
           console.log('Ubicacion actual', coords);
 
           if (coords.accuracy > this.MAX_ACCEPTABLE_ACCURACY) {
-            console.warn(`⚠️ Precisión rechazada por ser demasiado grande (${coords.accuracy.toFixed(0)}m). Usando fallback.`);
+            console.warn(`Precisión rechazada por ser demasiado grande (${coords.accuracy.toFixed(0)}m). Usando fallback.`);
             this.handleFallback(); // Llamada a fallback si la precisión es terrible
             return;
           }
@@ -122,49 +122,6 @@ export class Map implements AfterViewInit, OnDestroy {
       this.locationSubscription.unsubscribe();
     }
   }
-  /*
-    private locateUser(){
-      if(!navigator.geolocation){
-        console.error("No se pudo iniciar la geolocalización");
-        return;
-      }
-      
-    navigator.geolocation.getCurrentPosition(
-        (position) => {
-          const coords = {
-            lat: position.coords.latitude,
-            lng: position.coords.longitude
-          };
-  
-      console.log('Ubicacion actual', coords);    
-  
-      if(this.map){
-        this.map.flyTo([coords.lat, coords.lng], 16);
-  
-        if (this.userMarker) {
-            this.userMarker.setLatLng([coords.lat, coords.lng]);
-          } else {
-            this.userMarker = L.marker([coords.lat, coords.lng])
-              .addTo(this.map)
-              .bindPopup('Estas aqui')
-              .openPopup();
-          }
-      }
-  
-      },
-      (error) => {
-          console.error('Error al obtener la ubicación:', error.message);
-          alert('No se pudo obtener tu ubicación.');        
-        },
-        {
-          enableHighAccuracy: true,
-          timeout:10000,
-          maximumAge: 0
-        }
-      );
-    }
-  */
-
 
   private fullScreen() {
 

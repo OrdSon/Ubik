@@ -55,6 +55,11 @@
         },
         "serve": {
           "builder": "@angular/build:dev-server",
+          "options": {
+            "ssl": true,
+            "sslKey": "localhost+1-key.pem",
+            "sslCert": "localhost+1.pem"
+          },
           "configurations": {
             "production": {
               "buildTarget": "Ubik:build:production"

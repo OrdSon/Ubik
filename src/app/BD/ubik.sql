@@ -1,21 +1,29 @@
--- =====================================================
--- SISTEMA MULTI-TENANT DE GESTIÓN DE RUTAS Y LOGÍSTICA
--- PostgreSQL 14+ con PostGIS
--- =====================================================
-
--- Extensiones necesarias
 CREATE EXTENSION IF NOT EXISTS postgis;
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
+CREATE TYPE billing_period AS ENUM ('monthly', 'annual');
+
+CREATE TYPE subscription_status AS ENUM ('trial', 'active', 'suspended', 'cancelled', 'expired'); 
+
+CREATE TYPE payment_method AS ENUM ('credit_card','debit_card', 'bank_transfer', 'paypal', 'cash', 'google_pay', 'gtripe', 'other');
+
+CREATE TYPE bill_status AS ENUM ('paid', 'pending', 'overdue', 'cancelled');
+
+CREATE TYPE platform_users AS ENUM ('anthony','superadmin', 'admin', 'tecnico', 'soporte');
+CREATE TYPE gas_unit AS ENUM ('galones', 'litros');
+CREATE TYPE modules AS ENUM ('rutas','inventario','transporte','ventas', 'entregas', 'transferencias');
+
+CREATE TYPE fuel_type AS ENUM ('gasolina','diesel','electrico', 'hibrido_gasolina', 'hibrido_diesel');
 -- =====================================================
 -- NIVEL PLATAFORMA (SIN empresa_id)
 -- =====================================================
 
 -- Tabla: planes_suscripcion
 -- Planes disponibles en la plataforma
+--1
 CREATE TABLE planes_suscripcion (
-    id SERIAL PRIMARY KEY,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     nombre VARCHAR(100) NOT NULL UNIQUE,
     descripcion TEXT,
     precio_mensual DECIMAL(10,2) NOT NULL,
@@ -40,10 +48,10 @@ CREATE TABLE planes_suscripcion (
 
 COMMENT ON TABLE planes_suscripcion IS 'Planes de suscripción disponibles en la plataforma';
 
--- Tabla: empresas
--- Empresas registradas en la plataforma
-CREATE TABLE empresas (
-    id SERIAL PRIMARY KEY,
+
+--2
+CREATE TABLE empresa (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     -- Información básica
     nombre VARCHAR(200) NOT NULL,
     razon_social VARCHAR(300),
@@ -62,10 +70,10 @@ CREATE TABLE empresas (
     idioma VARCHAR(10) DEFAULT 'es',
     moneda VARCHAR(10) DEFAULT 'GTQ',
     -- Suscripción actual
-    plan_id INTEGER REFERENCES planes_suscripcion(id),
+    plan_id UUID REFERENCES planes_suscripcion(id),
     fecha_inicio_suscripcion DATE,
     fecha_fin_suscripcion DATE,
-    estado_suscripcion VARCHAR(50) DEFAULT 'trial', //tabla-- trial, active, suspended, cancelled
+    estado_suscripcion VARCHAR(50) DEFAULT 'trial', -- trial, active, suspended, cancelled
     -- Autenticación
     requiere_2fa BOOLEAN DEFAULT FALSE,
     permite_login_google BOOLEAN DEFAULT FALSE,
@@ -78,46 +86,55 @@ CREATE TABLE empresas (
     -- Control
     activo BOOLEAN DEFAULT TRUE,
     bloqueado BOOLEAN DEFAULT FALSE,
-    motivo_bloqueo TEXT,
     deleted_at TIMESTAMP,
     deleted_by INTEGER,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-COMMENT ON TABLE empresas IS 'Empresas registradas en la plataforma (multi-tenant)';
-CREATE INDEX idx_empresas_subdominio ON empresas(subdominio) WHERE deleted_at IS NULL;
-CREATE INDEX idx_empresas_activo ON empresas(activo, deleted_at) WHERE deleted_at IS NULL;
+COMMENT ON TABLE empresa IS 'Empresas registradas en la plataforma';
+CREATE INDEX idx_empresa_subdominio ON empresa(subdominio) WHERE deleted_at IS NULL;
+CREATE INDEX idx_empresa_activo ON empresa(activo, deleted_at) WHERE deleted_at IS NULL;
+
+--3
+CREATE TABLE bloqueo(
+    id SERIAL PRIMARY KEY,
+    empresa_id UUID REFERENCES empresa(id) ON DELETE CASCADE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    motivo TEXT
+
+)
+
+
 
 -- Tabla: suscripciones
 -- Historial de suscripciones de cada empresa
-CREATE TABLE suscripciones (
-    id SERIAL PRIMARY KEY,
-    empresa_id INTEGER NOT NULL REFERENCES empresas(id) ON DELETE CASCADE,
-    plan_id INTEGER NOT NULL REFERENCES planes_suscripcion(id),
+--4
+CREATE TABLE suscripcion (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    empresa_id UUID NOT NULL REFERENCES empresa(id) ON DELETE CASCADE,
+    plan_id UUID NOT NULL REFERENCES planes_suscripcion(id),
     fecha_inicio DATE NOT NULL,
     fecha_fin DATE,
     precio_pagado DECIMAL(10,2) NOT NULL,
-    periodo_facturacion VARCHAR(20) NOT NULL, -- monthly, annual
-    estado VARCHAR(50) DEFAULT 'active', -- active, expired, cancelled
+    periodo_facturacion billing_period NOT NULL, -- monthly, annual
+    estado  subscription_status, -- active, expired, cancelled
     -- Información de pago
-    metodo_pago VARCHAR(50), -- credit_card, bank_transfer, paypal
+    metodo_pago payment_method,-- credit_card, bank_transfer, paypal
     referencia_pago VARCHAR(200),
     -- Control
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-COMMENT ON TABLE suscripciones IS 'Historial de suscripciones de empresas';
-CREATE INDEX idx_suscripciones_empresa ON suscripciones(empresa_id, estado);
-CREATE INDEX idx_suscripciones_fechas ON suscripciones(fecha_inicio, fecha_fin);
-
--- Tabla: facturacion
--- Facturas generadas para empresas
+COMMENT ON TABLE suscripcion IS 'Historial de suscripciones de empresas';
+CREATE INDEX idx_suscripciones_empresa ON suscripcion(empresa_id, estado);
+CREATE INDEX idx_suscripciones_fechas ON suscripcion(fecha_inicio, fecha_fin);
+--5
 CREATE TABLE facturacion (
-    id SERIAL PRIMARY KEY,
-    empresa_id INTEGER NOT NULL REFERENCES empresas(id) ON DELETE CASCADE,
-    suscripcion_id INTEGER REFERENCES suscripciones(id),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    empresa_id UUID NOT NULL REFERENCES empresa(id) ON DELETE CASCADE,
+    suscripcion_id UUID REFERENCES suscripcion(id),
     numero_factura VARCHAR(100) UNIQUE NOT NULL,
     fecha_emision DATE NOT NULL,
     fecha_vencimiento DATE NOT NULL,
@@ -126,7 +143,7 @@ CREATE TABLE facturacion (
     impuestos DECIMAL(10,2) DEFAULT 0,
     total DECIMAL(10,2) NOT NULL,
     -- Estado
-    estado VARCHAR(50) DEFAULT 'pending', -- pending, paid, overdue, cancelled
+    estado bill_status DEFAULT 'pending', -- pending, paid, overdue, cancelled
     fecha_pago TIMESTAMP,
     metodo_pago VARCHAR(50),
     referencia_pago VARCHAR(200),
@@ -141,14 +158,13 @@ COMMENT ON TABLE facturacion IS 'Facturas emitidas a empresas';
 CREATE INDEX idx_facturacion_empresa ON facturacion(empresa_id, estado);
 CREATE INDEX idx_facturacion_estado ON facturacion(estado, fecha_vencimiento);
 
--- Tabla: usuarios_plataforma
--- Personal de soporte y administración de la plataforma
-CREATE TABLE usuarios_plataforma (
-    id SERIAL PRIMARY KEY,
+--6
+CREATE TABLE usuario_plataforma (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     nombre_completo VARCHAR(200) NOT NULL,
     email VARCHAR(255) UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,
-    rol VARCHAR(50) NOT NULL, -- superadmin, admin, tecnico, soporte
+    rol platform_users NOT NULL, -- superadmin, admin, tecnico, soporte
     -- Permisos específicos
     puede_ver_todas_empresas BOOLEAN DEFAULT FALSE,
     puede_modificar_planes BOOLEAN DEFAULT FALSE,
@@ -159,38 +175,36 @@ CREATE TABLE usuarios_plataforma (
     two_factor_secret TEXT,
     ultimo_acceso TIMESTAMP,
     ip_ultimo_acceso INET,
-    -- Control
     activo BOOLEAN DEFAULT TRUE,
     deleted_at TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
-
-COMMENT ON TABLE usuarios_plataforma IS 'Usuarios del equipo de la plataforma';
-CREATE INDEX idx_usuarios_plataforma_email ON usuarios_plataforma(email) WHERE deleted_at IS NULL;
-
--- Tabla: asignaciones_soporte
--- Técnicos asignados a empresas específicas
+COMMENT ON TABLE usuario_plataforma IS 'Usuarios del equipo de la plataforma';
+CREATE INDEX idx_usuarios_plataforma_email ON usuario_plataforma(email) WHERE deleted_at IS NULL;
+--7
 CREATE TABLE asignaciones_soporte (
     id SERIAL PRIMARY KEY,
-    usuario_plataforma_id INTEGER NOT NULL REFERENCES usuarios_plataforma(id) ON DELETE CASCADE,
-    empresa_id INTEGER NOT NULL REFERENCES empresas(id) ON DELETE CASCADE,
+    usuario_plataforma_id UUID NOT NULL REFERENCES usuario_plataforma(id) ON DELETE CASCADE,
+    empresa_id UUID NOT NULL REFERENCES empresa(id) ON DELETE CASCADE,
     fecha_asignacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     fecha_fin TIMESTAMP,
     activo BOOLEAN DEFAULT TRUE,
     UNIQUE(usuario_plataforma_id, empresa_id, activo)
 );
 
+
 COMMENT ON TABLE asignaciones_soporte IS 'Asignación de técnicos a empresas específicas';
 CREATE INDEX idx_asignaciones_empresa ON asignaciones_soporte(empresa_id, activo);
 CREATE INDEX idx_asignaciones_usuario ON asignaciones_soporte(usuario_plataforma_id, activo);
 
--- Tabla: logs_acceso_plataforma
--- Registro de accesos del equipo de plataforma
+
+
+--8
 CREATE TABLE logs_acceso_plataforma (
     id BIGSERIAL PRIMARY KEY,
-    usuario_plataforma_id INTEGER REFERENCES usuarios_plataforma(id),
-    empresa_accedida_id INTEGER REFERENCES empresas(id),
+    usuario_plataforma_id UUID REFERENCES usuario_plataforma(id),
+    empresa_accedida_id UUID REFERENCES empresa(id),
     accion VARCHAR(200) NOT NULL,
     detalles JSONB,
     ip_address INET,
@@ -198,15 +212,15 @@ CREATE TABLE logs_acceso_plataforma (
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+
 COMMENT ON TABLE logs_acceso_plataforma IS 'Auditoría de accesos del equipo de plataforma';
 CREATE INDEX idx_logs_plataforma_usuario ON logs_acceso_plataforma(usuario_plataforma_id, timestamp DESC);
 CREATE INDEX idx_logs_plataforma_empresa ON logs_acceso_plataforma(empresa_accedida_id, timestamp DESC);
 
--- Tabla: onboarding_empresas
--- Seguimiento del proceso de configuración inicial
-CREATE TABLE onboarding_empresas (
-    id SERIAL PRIMARY KEY,
-    empresa_id INTEGER NOT NULL REFERENCES empresas(id) ON DELETE CASCADE,
+--8
+CREATE TABLE onboarding_empresa (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    empresa_id UUID NOT NULL REFERENCES empresa(id) ON DELETE CASCADE,
     -- Pasos completados
     paso_registro_completado BOOLEAN DEFAULT TRUE,
     paso_configuracion_basica BOOLEAN DEFAULT FALSE,
@@ -231,21 +245,17 @@ CREATE TABLE onboarding_empresas (
     -- Asistencia
     requiere_asistencia BOOLEAN DEFAULT FALSE,
     notas_asistencia TEXT,
-    asignado_a INTEGER REFERENCES usuarios_plataforma(id),
+    asignado_a UUID REFERENCES usuario_plataforma(id),
     -- Control
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(empresa_id)
 );
 
-COMMENT ON TABLE onboarding_empresas IS 'Seguimiento del proceso de onboarding de nuevas empresas';
-CREATE INDEX idx_onboarding_incompleto ON onboarding_empresas(empresa_id) WHERE onboarding_completado = FALSE;
+COMMENT ON TABLE onboarding_empresa IS 'Seguimiento del proceso de onboarding de nuevas empresas';
+CREATE INDEX idx_onboarding_incompleto ON onboarding_empresa(empresa_id) WHERE onboarding_completado = FALSE;
 
--- =====================================================
--- CATÁLOGOS PREDEFINIDOS (NIVEL PLATAFORMA)
--- =====================================================
-
--- Tabla: tipos_vehiculos_predefinidos
+--9
 CREATE TABLE tipos_vehiculos_predefinidos (
     id SERIAL PRIMARY KEY,
     nombre VARCHAR(100) NOT NULL UNIQUE,
@@ -259,7 +269,7 @@ CREATE TABLE tipos_vehiculos_predefinidos (
 
 COMMENT ON TABLE tipos_vehiculos_predefinidos IS 'Catálogo base de tipos de vehículos';
 
--- Tabla: categorias_productos_predefinidas
+--10
 CREATE TABLE categorias_productos_predefinidas (
     id SERIAL PRIMARY KEY,
     nombre VARCHAR(100) NOT NULL UNIQUE,
@@ -271,7 +281,7 @@ CREATE TABLE categorias_productos_predefinidas (
 
 COMMENT ON TABLE categorias_productos_predefinidas IS 'Catálogo base de categorías de productos';
 
--- Tabla: motivos_justificacion_predefinidos
+--11
 CREATE TABLE motivos_justificacion_predefinidos (
     id SERIAL PRIMARY KEY,
     nombre VARCHAR(100) NOT NULL UNIQUE,
@@ -282,36 +292,33 @@ CREATE TABLE motivos_justificacion_predefinidos (
     activo BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
-
 COMMENT ON TABLE motivos_justificacion_predefinidos IS 'Catálogo base de motivos de justificación';
 
--- =====================================================
--- NIVEL EMPRESA - CONFIGURACIÓN Y USUARIOS
--- =====================================================
-
--- Tabla: configuraciones_empresa
--- Configuraciones específicas de cada empresa
+--12
 CREATE TABLE configuraciones_empresa (
-    id SERIAL PRIMARY KEY,
-    empresa_id INTEGER NOT NULL REFERENCES empresas(id) ON DELETE CASCADE,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    empresa_id UUID NOT NULL REFERENCES empresa(id) ON DELETE CASCADE,
     -- Configuración de tracking GPS
     frecuencia_gps_vehiculo_pequeno_segundos INTEGER DEFAULT 30,
     frecuencia_gps_vehiculo_mediano_segundos INTEGER DEFAULT 60,
     frecuencia_gps_vehiculo_grande_segundos INTEGER DEFAULT 120,
     -- Configuración de alertas
     distancia_desviacion_metros DECIMAL(10,2) DEFAULT 10,
+    --define a que distancia del destino se envia la notificación de proximidad al conductor
     distancia_proximidad_parada_metros DECIMAL(10,2) DEFAULT 100,
+    --define el margen que tiene el conductor en minutos para comenzar su viaje.
     margen_inicio_ruta_minutos INTEGER DEFAULT 30,
+    --define el margen que tiene el conductor en minutos para terminar su viaje.
     margen_fin_ruta_minutos INTEGER DEFAULT 30,
     -- Configuración de devoluciones
     dias_limite_devolucion INTEGER DEFAULT 7,
     requiere_foto_devolucion BOOLEAN DEFAULT TRUE,
     requiere_justificacion_devolucion BOOLEAN DEFAULT TRUE,
     -- Configuración de inventario
-    alerta_productos_vencimiento_dias INTEGER DEFAULT 7,
+    alerta_productos_vencimiento_dias INTEGER DEFAULT 14,
     permite_ventas_parciales BOOLEAN DEFAULT TRUE,
     -- Configuración de combustible
-    tipo_medida_combustible VARCHAR(20) DEFAULT 'galones', -- galones, litros
+    tipo_medida_combustible gas_unit DEFAULT 'galones', -- galones, litros
     -- Módulos activos
     modulo_ventas_activo BOOLEAN DEFAULT TRUE,
     modulo_entregas_activo BOOLEAN DEFAULT TRUE,
@@ -325,14 +332,21 @@ CREATE TABLE configuraciones_empresa (
 
 COMMENT ON TABLE configuraciones_empresa IS 'Configuraciones específicas por empresa';
 
--- Tabla: roles
--- Roles configurables por empresa
+--13
+CREATE TABLE nivel_jerarquico (
+    id SERIAL PRIMARY KEY,
+    nombre VARCHAR(100) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+COMMENT ON TABLE nivel_jerarquico IS 'Niveles jerarquicos contemplados para las distintas empresas';
+--14
 CREATE TABLE roles (
     id SERIAL PRIMARY KEY,
-    empresa_id INTEGER NOT NULL REFERENCES empresas(id) ON DELETE CASCADE,
+    empresa_id UUID NOT NULL REFERENCES empresa(id) ON DELETE CASCADE,
     nombre VARCHAR(100) NOT NULL,
     descripcion TEXT,
-    nivel_jerarquico INTEGER NOT NULL, -- 1=Dueño, 2=Admin, 3=Supervisor, 4=Conductor, 5=Ayudante
+    nivel_jerarquico_id INTEGER REFERENCES nivel_jerarquico(id) NOT NULL, -- 1=Dueño, 2=Admin, 3=Supervisor, 4=Conductor, 5=Ayudante
     es_rol_sistema BOOLEAN DEFAULT FALSE, -- No se puede eliminar
     -- Control
     activo BOOLEAN DEFAULT TRUE,
@@ -345,21 +359,20 @@ CREATE TABLE roles (
 COMMENT ON TABLE roles IS 'Roles configurables por empresa';
 CREATE INDEX idx_roles_empresa ON roles(empresa_id, activo) WHERE deleted_at IS NULL;
 
--- Tabla: permisos
--- Permisos granulares del sistema
+
+--15
 CREATE TABLE permisos (
     id SERIAL PRIMARY KEY,
     codigo VARCHAR(100) NOT NULL UNIQUE,
     nombre VARCHAR(200) NOT NULL,
     descripcion TEXT,
-    modulo VARCHAR(100) NOT NULL, -- rutas, inventario, usuarios, reportes, etc.
+    modulo modules NOT NULL, -- rutas, inventario, usuarios, reportes, etc.
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 COMMENT ON TABLE permisos IS 'Catálogo de permisos del sistema';
 
--- Tabla: roles_permisos
--- Permisos asignados a cada rol
+--16
 CREATE TABLE roles_permisos (
     id SERIAL PRIMARY KEY,
     rol_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
@@ -371,16 +384,15 @@ CREATE TABLE roles_permisos (
 COMMENT ON TABLE roles_permisos IS 'Permisos asignados a roles';
 CREATE INDEX idx_roles_permisos_rol ON roles_permisos(rol_id);
 
--- Tabla: usuarios
--- Usuarios de cada empresa (conductores, supervisores, admins)
-CREATE TABLE usuarios (
+--17
+CREATE TABLE usuario (
     id SERIAL PRIMARY KEY,
-    empresa_id INTEGER NOT NULL REFERENCES empresas(id) ON DELETE CASCADE,
+    empresa_id UUID NOT NULL REFERENCES empresa(id) ON DELETE CASCADE,
     rol_id INTEGER NOT NULL REFERENCES roles(id),
     -- Información personal
     nombre_completo VARCHAR(200) NOT NULL,
     email VARCHAR(255) NOT NULL,
-    telefono VARCHAR(50),
+    telefono VARCHAR(20),
     fecha_nacimiento DATE,
     -- Autenticación
     password_hash TEXT NOT NULL,
@@ -401,29 +413,24 @@ CREATE TABLE usuarios (
     ip_ultimo_acceso INET,
     intentos_fallidos_login INTEGER DEFAULT 0,
     bloqueado_hasta TIMESTAMP,
-    -- Control
     activo BOOLEAN DEFAULT TRUE,
     deleted_at TIMESTAMP,
-    deleted_by INTEGER,
+    deleted_by_usuario INTEGER REFERENCES usuario(id),
+    deleted_by_plataforma UUID REFERENCES usuario_plataforma(id),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(empresa_id, email)
 );
 
-COMMENT ON TABLE usuarios IS 'Usuarios de empresas (conductores, supervisores, admins)';
-CREATE INDEX idx_usuarios_empresa ON usuarios(empresa_id, activo) WHERE deleted_at IS NULL;
-CREATE INDEX idx_usuarios_email ON usuarios(empresa_id, email) WHERE deleted_at IS NULL;
-CREATE INDEX idx_usuarios_rol ON usuarios(rol_id, activo) WHERE deleted_at IS NULL;
+COMMENT ON TABLE usuario IS 'Usuarios de empresas (conductores, supervisores, admins)';
+CREATE INDEX idx_usuarios_empresa ON usuario(empresa_id, activo) WHERE deleted_at IS NULL;
+CREATE INDEX idx_usuarios_email ON usuario(empresa_id, email) WHERE deleted_at IS NULL;
+CREATE INDEX idx_usuarios_rol ON usuario(rol_id, activo) WHERE deleted_at IS NULL;
 
--- =====================================================
--- NIVEL EMPRESA - CATÁLOGOS PERSONALIZABLES
--- =====================================================
-
--- Tabla: tipos_vehiculos
--- Tipos de vehículos por empresa (basados en predefinidos)
+--18
 CREATE TABLE tipos_vehiculos (
     id SERIAL PRIMARY KEY,
-    empresa_id INTEGER NOT NULL REFERENCES empresas(id) ON DELETE CASCADE,
+    empresa_id UUID NOT NULL REFERENCES empresa(id) ON DELETE CASCADE,
     basado_en_predefinido_id INTEGER REFERENCES tipos_vehiculos_predefinidos(id),
     nombre VARCHAR(100) NOT NULL,
     descripcion TEXT,
@@ -438,14 +445,14 @@ CREATE TABLE tipos_vehiculos (
     UNIQUE(empresa_id, nombre)
 );
 
+
 COMMENT ON TABLE tipos_vehiculos IS 'Tipos de vehículos configurables por empresa';
 CREATE INDEX idx_tipos_vehiculos_empresa ON tipos_vehiculos(empresa_id, activo) WHERE deleted_at IS NULL;
 
--- Tabla: categorias_productos
--- Categorías de productos por empresa
+--19
 CREATE TABLE categorias_productos (
-    id SERIAL PRIMARY KEY,
-    empresa_id INTEGER NOT NULL REFERENCES empresas(id) ON DELETE CASCADE,
+    id BIGSERIAL PRIMARY KEY,
+    empresa_id UUID NOT NULL REFERENCES empresa(id) ON DELETE CASCADE,
     basado_en_predefinido_id INTEGER REFERENCES categorias_productos_predefinidas(id),
     nombre VARCHAR(100) NOT NULL,
     descripcion TEXT,
@@ -456,6 +463,8 @@ CREATE TABLE categorias_productos (
     deleted_at TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    deleted_by_usuario INTEGER REFERENCES usuario(id),
+    deleted_by_plataforma UUID REFERENCES usuario_plataforma(id),
     UNIQUE(empresa_id, nombre)
 );
 
@@ -463,11 +472,11 @@ COMMENT ON TABLE categorias_productos IS 'Categorías de productos configurables
 CREATE INDEX idx_categorias_empresa ON categorias_productos(empresa_id, activo) WHERE deleted_at IS NULL;
 CREATE INDEX idx_categorias_padre ON categorias_productos(padre_id);
 
--- Tabla: motivos_justificacion
--- Motivos de justificación por empresa
-CREATE TABLE motivos_justificacion (
+
+--20
+CREATE TABLE motivo_justificacion (
     id SERIAL PRIMARY KEY,
-    empresa_id INTEGER NOT NULL REFERENCES empresas(id) ON DELETE CASCADE,
+    empresa_id UUID NOT NULL REFERENCES empresa(id) ON DELETE CASCADE,
     basado_en_predefinido_id INTEGER REFERENCES motivos_justificacion_predefinidos(id),
     nombre VARCHAR(100) NOT NULL,
     descripcion TEXT,
@@ -483,14 +492,19 @@ CREATE TABLE motivos_justificacion (
     UNIQUE(empresa_id, nombre, tipo)
 );
 
-COMMENT ON TABLE motivos_justificacion IS 'Motivos de justificación configurables por empresa';
-CREATE INDEX idx_motivos_empresa ON motivos_justificacion(empresa_id, tipo, activo) WHERE deleted_at IS NULL;
+
+COMMENT ON TABLE motivo_justificacion IS 'Motivos de justificación configurables por empresa';
+CREATE INDEX idx_motivos_empresa ON motivo_justificacion(empresa_id, tipo, activo) WHERE deleted_at IS NULL;
+
+
+
+--21
 
 -- Tabla: tipos_rutas
 -- Tipos de rutas configurables por empresa
-CREATE TABLE tipos_rutas (
+CREATE TABLE tipo_ruta (
     id SERIAL PRIMARY KEY,
-    empresa_id INTEGER NOT NULL REFERENCES empresas(id) ON DELETE CASCADE,
+    empresa_id UUID NOT NULL REFERENCES empresa(id) ON DELETE CASCADE,
     nombre VARCHAR(100) NOT NULL,
     descripcion TEXT,
     codigo VARCHAR(50) NOT NULL, -- exploracion, entrega, venta, mixta, reabastecimiento
@@ -503,27 +517,58 @@ CREATE TABLE tipos_rutas (
     deleted_at TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(empresa_id, codigo)
+    UNIQUE(empresa_id, codigo),
+    created_by_usuario INTEGER REFERENCES usuario(id),
+    deleted_by_usuario INTEGER REFERENCES usuario(id),
+    deleted_by_plataforma UUID REFERENCES usuario_plataforma(id)
 );
-
-COMMENT ON TABLE tipos_rutas IS 'Tipos de rutas configurables por empresa';
-CREATE INDEX idx_tipos_rutas_empresa ON tipos_rutas(empresa_id, activo) WHERE deleted_at IS NULL;
+COMMENT ON TABLE tipo_ruta IS 'Tipos de rutas configurables por empresa';
+CREATE INDEX idx_tipos_rutas_empresa ON tipo_ruta(empresa_id, activo) WHERE deleted_at IS NULL;
 
 -- =====================================================
 -- NIVEL EMPRESA - ESTRUCTURA ORGANIZACIONAL
 -- =====================================================
 
 -- Tabla: sucursales
-CREATE TABLE sucursales (
+
+--22
+CREATE TABLE pais(
+    id BIGINT PRIMARY KEY,
+    codigo_iso_alfa2 CHAR(2), --US, MX, GT
+    codigo_iso_alfa3 CHAR(3),-- USA, MEX, ESP
+    nombre_es VARCHAR(100),
+    nombre_en VARCHAR(100),
+    codigo_telefonico VARCHAR (10),
+    codigo_moneda CHAR(3),
+    activo BOOLEAN
+
+);
+
+--23
+ 
+CREATE TABLE departamento (
     id SERIAL PRIMARY KEY,
-    empresa_id INTEGER NOT NULL REFERENCES empresas(id) ON DELETE CASCADE,
+    pais_id INTEGER REFERENCES pais(id) NOT NULL,
+    nombre TEXT NOT NULL
+);
+
+--24
+CREATE TABLE municipio (
+    id SERIAL PRIMARY KEY,
+    departamento_id INTEGER REFERENCES departamento(ID) NOT NULL,
+    nombre TEXT NOT NULL,
+    codigo_postal VARCHAR(10) NOT NULL
+);
+
+--25
+CREATE TABLE sucursal (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    empresa_id UUID NOT NULL REFERENCES empresa(id) ON DELETE CASCADE,
     nombre VARCHAR(200) NOT NULL,
     codigo VARCHAR(50) NOT NULL,
     -- Ubicación
     direccion TEXT,
-    ciudad VARCHAR(100),
-    estado_departamento VARCHAR(100),
-    pais VARCHAR(100),
+    municipio_id INTEGER REFERENCES municipio(id),
     codigo_postal VARCHAR(20),
     ubicacion GEOGRAPHY(POINT, 4326),
     area_cobertura GEOGRAPHY(POLYGON, 4326), -- Área que cubre esta sucursal
@@ -553,44 +598,221 @@ CREATE INDEX idx_sucursales_area ON sucursales USING GIST(area_cobertura) WHERE 
 ALTER TABLE usuarios ADD CONSTRAINT fk_usuarios_sucursal 
     FOREIGN KEY (sucursal_principal_id) REFERENCES sucursales(id);
 
--- Tabla: vehiculos
-CREATE TABLE vehiculos (
+
+---######### HORARIOS #######
+
+-- 1. Catálogo Maestro de Festivos (Nivel Plataforma)
+-- Sirve para copiar festivos a las empresas automáticamente
+--26
+CREATE TABLE plantillas_festivos_globales (
     id SERIAL PRIMARY KEY,
-    empresa_id INTEGER NOT NULL REFERENCES empresas(id) ON DELETE CASCADE,
-    sucursal_actual_id INTEGER REFERENCES sucursales(id),
+    pais_id BIGINT REFERENCES pais(id) NOT NULL,
+    nombre VARCHAR(100) NOT NULL,
+    dia INTEGER NOT NULL CHECK (dia BETWEEN 1 AND 31),
+    mes INTEGER NOT NULL CHECK (mes BETWEEN 1 AND 12),
+    es_irrenunciable BOOLEAN DEFAULT TRUE,
+    activo BOOLEAN DEFAULT TRUE,
+    UNIQUE(pais_id, mes, dia)
+);
+
+-- 2. Festivos por Empresa (Instancia Local)
+-- Aquí se copian los globales y la empresa agrega los suyos
+--27
+CREATE TABLE dias_festivos (
+    id SERIAL PRIMARY KEY,
+    empresa_id UUID NOT NULL REFERENCES empresa(id) ON DELETE CASCADE,
+    nombre VARCHAR(100) NOT NULL,
+    fecha DATE NOT NULL,
+    es_laborable BOOLEAN DEFAULT FALSE, -- Si es TRUE, se paga extra pero se trabaja
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(empresa_id, fecha)
+);
+
+-- 3. Definición de Turnos (Bloques de tiempo)
+-- Define CÓMO es un turno, no CUÁNDO oc-- 3. Turnos (Mejorado para detectar cruce de día)
+--28
+CREATE TABLE turnos_trabajo (
+    id SERIAL PRIMARY KEY,
+    empresa_id UUID NOT NULL REFERENCES empresa(id) ON DELETE CASCADE,
+    nombre VARCHAR(100) NOT NULL,
+    hora_inicio TIME NOT NULL,
+    hora_fin TIME NOT NULL,
+    -- Si hora_fin < hora_inicio, el sistema asume que cruza medianoche
+    minutos_descanso INTEGER DEFAULT 60,
+    margen_entrada_minutos INTEGER DEFAULT 15,
+    color_identificador VARCHAR(7),
+    activo BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 4. Cabecera del Patrón de Horario
+-- Ej: "Horario Administrativo (Lun-Vie)" o "Rotación Guardias (Mensual)"
+--29
+CREATE TABLE patrones_horarios (
+    id SERIAL PRIMARY KEY,
+    empresa_id UUID NOT NULL REFERENCES empresa(id) ON DELETE CASCADE,
+    nombre VARCHAR(150) NOT NULL,
+    tipo_ciclo VARCHAR(20) NOT NULL CHECK (tipo_ciclo IN ('semanal', 'mensual', 'dias_n')),    
+    cantidad_dias_ciclo INTEGER, 
+    fecha_base_rotacion DATE, 
+    descripcion TEXT,
+    activo BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 5. Detalles del Patrón (La repetición)
+-- Define qué turno toca cada día del ciclo
+-- 5. Detalles Patrón (CORREGIDO: Límite de días eliminado)
+
+--30
+CREATE TABLE detalles_patron_horario (
+    id SERIAL PRIMARY KEY,
+    patron_horario_id INTEGER NOT NULL REFERENCES patrones_horarios(id) ON DELETE CASCADE,
+    turno_trabajo_id INTEGER REFERENCES turnos_trabajo(id),
+    
+    -- CORRECCIÓN: Quitamos el límite de 31 para soportar rotaciones largas (dias_n)
+    dia_numero INTEGER NOT NULL CHECK (dia_numero > 0),
+    
+    es_descanso BOOLEAN DEFAULT FALSE,
+    UNIQUE(patron_horario_id, dia_numero)
+);
+
+--31
+CREATE TABLE asignaciones_horario_usuario (
+    id SERIAL PRIMARY KEY,
+    empresa_id UUID NOT NULL REFERENCES empresa(id) ON DELETE CASCADE,
+    usuario_id INTEGER NOT NULL REFERENCES usuario(id) ON DELETE CASCADE,
+    patron_horario_id INTEGER NOT NULL REFERENCES patrones_horarios(id),
+    
+    fecha_inicio DATE NOT NULL,
+    fecha_fin DATE, 
+    
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    
+    CONSTRAINT chk_fechas CHECK (fecha_fin IS NULL OR fecha_fin >= fecha_inicio),
+    
+    -- CORRECCIÓN PRO: Evita que asignes 2 horarios al mismo usuario el mismo día
+    EXCLUDE USING GIST (
+        usuario_id WITH =, 
+        DATERANGE(fecha_inicio, COALESCE(fecha_fin, '2999-12-31'), '[]') WITH &&
+    )
+);
+CREATE INDEX idx_asignacion_usuario ON asignaciones_horario_usuario(usuario_id, fecha_inicio);
+
+-- 7. Excepciones de Horario (Overrides)
+-- Para días específicos que se salen del patrón (cambio de turno, permiso, falta)
+
+--32
+CREATE TABLE excepciones_horario (
+    id SERIAL PRIMARY KEY,
+    empresa_id UUID NOT NULL REFERENCES empresa(id) ON DELETE CASCADE,
+    usuario_id INTEGER NOT NULL REFERENCES usuario(id) ON DELETE CASCADE,
+    fecha DATE NOT NULL,
+    
+    tipo VARCHAR(50) NOT NULL, 
+    turno_temporal_id INTEGER REFERENCES turnos_trabajo(id),
+    
+    -- CORRECCIÓN PRO: Permisos por horas (llegadas tarde, citas médicas)
+    es_parcial BOOLEAN DEFAULT FALSE,
+    horas_a_descontar DECIMAL(5,2) DEFAULT 0,
+    es_con_goce_sueldo BOOLEAN DEFAULT FALSE,
+    
+    observaciones TEXT,
+    aprobado_por INTEGER REFERENCES usuario(id),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(usuario_id, fecha)
+);
+
+-- 8. Registro de Asistencia (Time Tracking)
+-- El fichaje real
+
+--33
+CREATE TABLE registro_asistencia (
+    id BIGSERIAL PRIMARY KEY,
+    empresa_id UUID NOT NULL REFERENCES empresa(id) ON DELETE CASCADE,
+    usuario_id INTEGER NOT NULL REFERENCES usuario(id),
+    
+    -- CORRECCIÓN: Fecha contable para separar el día de pago del día real
+    fecha_contable DATE NOT NULL, 
+    turno_asignado_id INTEGER REFERENCES turnos_trabajo(id),
+    
+    entrada_real TIMESTAMP,
+    salida_real TIMESTAMP,
+    
+    -- CORRECCIÓN PRO: JSONB para múltiples descansos (esencial para choferes)
+    -- Estructura: [{"inicio": "10:00", "fin": "10:15", "tipo": "baño"}, {"inicio": "13:00", "fin": "14:00", "tipo": "comida"}]
+    descansos_log JSONB DEFAULT '[]',
+    total_minutos_descanso INTEGER DEFAULT 0,
+    
+    ubicacion_entrada GEOGRAPHY(POINT, 4326),
+    ubicacion_salida GEOGRAPHY(POINT, 4326),
+    
+    horas_normales DECIMAL(5,2),
+    horas_extras DECIMAL(5,2),
+    horas_nocturnas DECIMAL(5,2), -- Importante para pago diferencial
+    minutos_tardia INTEGER,
+    
+    estado VARCHAR(20) DEFAULT 'abierto',
+    
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+--#####FIN SECCION HORARIOS#######
+-- Tabla: vehiculos
+--34
+CREATE TABLE vehiculos (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    empresa_id UUID NOT NULL REFERENCES empresa(id) ON DELETE CASCADE,
+    sucursal_actual_id UUID REFERENCES sucursales(id), -- Corregido a plural según tu esquema anterior
     tipo_vehiculo_id INTEGER NOT NULL REFERENCES tipos_vehiculos(id),
-    -- Información del vehículo
-    placa VARCHAR(50) NOT NULL,
+    
+    -- Identificación
+    placa VARCHAR(20) NOT NULL, -- 50 es mucho para placa
     marca VARCHAR(100),
     modelo VARCHAR(100),
     anio INTEGER,
     color VARCHAR(50),
-    -- Capacidades
+    numero_economico VARCHAR(50), -- ID interno de la empresa (Ej: "Unidad-05")
+    vin VARCHAR(100), -- Número de serie del chasis (importante para seguros/taller)
+
+    -- Capacidades (Vital para el algoritmo de rutas)
     capacidad_peso_kg DECIMAL(10,2) NOT NULL,
     capacidad_volumen_m3 DECIMAL(10,2) NOT NULL,
+    
     -- Combustible
     capacidad_tanque_galones DECIMAL(10,2),
-    rendimiento_km_por_galon DECIMAL(10,2),
-    tipo_combustible VARCHAR(50), -- gasolina, diesel, electrico, hibrido
-    -- Tracking
+    rendimiento_teorico_km_galon DECIMAL(10,2), -- Lo que dice el manual
+    rendimiento_real_km_galon DECIMAL(10,2), -- Promedio histórico calculado
+    tipo_combustible fuel_type DEFAULT 'diesel',
+    
+    -- Tracking & Telemetría
     dispositivo_gps_id VARCHAR(100),
-    frecuencia_actualizacion_segundos INTEGER,
-    -- Estado
-    estado VARCHAR(50) DEFAULT 'disponible', -- disponible, en_ruta, mantenimiento, fuera_servicio
+    proveedor_gps VARCHAR(100),
+    frecuencia_actualizacion_segundos INTEGER DEFAULT 60,
+    
+    -- Estado Actual (Snapshot)
+    estado estado_vehiculo_enum DEFAULT 'disponible',
     ubicacion_actual GEOGRAPHY(POINT, 4326),
     ultima_actualizacion_gps TIMESTAMP,
-    -- Mantenimiento
+    velocidad_actual_kmh DECIMAL(5,2),
+    
+    -- Mantenimiento y Odómetro
     ultimo_mantenimiento DATE,
     proximo_mantenimiento DATE,
-    kilometraje_actual DECIMAL(10,2),
-    -- Control
-    activo BOOLEAN DEFAULT TRUE,
-    deleted_at TIMESTAMP,
-    deleted_by INTEGER,
+    kilometraje_actual DECIMAL(12,2), -- DECIMAL(10,2) se queda corto para camiones viejos (99,999.99)
+    horas_motor DECIMAL(10,2), -- Para maquinaria o camiones, a veces cuentan horas, no KM
+    
+    -- Control Administrativo
+    activo BOOLEAN DEFAULT TRUE, -- TRUE = En flota activa, FALSE = Baja administrativa (sin seguro, etc)
+    deleted_at TIMESTAMP, -- Soft Delete (Vendido, chatarra)
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(empresa_id, placa)
+    
+    UNIQUE(empresa_id, placa),
+    UNIQUE(empresa_id, numero_economico)
 );
+
+CREATE INDEX idx_vehiculos_estado ON vehiculos(empresa_id, estado);
+CREATE INDEX idx_vehiculos_ubicacion ON vehiculos USING GIST(ubicacion_actual);
 
 COMMENT ON TABLE vehiculos IS 'Vehículos de la flota de cada empresa';
 CREATE INDEX idx_vehiculos_empresa ON vehiculos(empresa_id, activo) WHERE deleted_at IS NULL;
